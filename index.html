@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NGワードゲーム</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; background: #f0f2f5; }
+        .box { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 450px; margin: auto; margin-bottom: 15px; }
+        input, button { width: 100%; padding: 10px; margin: 5px 0; box-sizing: border-box; }
+        button { background: #007bff; color: white; border: none; cursor: pointer; border-radius: 4px; font-weight: bold; }
+        button:disabled { background: #cccccc; cursor: not-allowed; }
+        .hidden { display: none; }
+        ul { padding-left: 20px; }
+        .user-card { border: 1px solid #ddd; padding: 12px; margin: 8px 0; border-radius: 6px; background: #fafafa; display: flex; justify-content: space-between; align-items: center; }
+        .word-highlight { color: #dc3545; font-size: 1.1em; font-weight: bold; }
+        .out-badge { background: #ffc107; color: #000; padding: 2px 6px; border-radius: 4px; font-size: 0.85em; font-weight: bold; }
+        .out-btn { width: auto; background: #dc3545; margin: 0; padding: 6px 12px; font-size: 0.9em; }
+        .log-box { background: #e9ecef; padding: 10px; border-radius: 4px; max-height: 150px; overflow-y: auto; font-size: 0.9em; line-height: 1.4; }
+        .host-badge { background: #17a2b8; color: white; font-size: 0.75em; padding: 2px 5px; border-radius: 3px; margin-left: 5px; }
+        .notice-text { color: #666; font-size: 0.85em; text-align: center; font-style: italic; }
+    </style>
+</head>
+<body>
+
+    <div id="login-screen" class="box">
+        <h2>NGワードゲーム</h2>
+        <input type="text" id="room-id-input" placeholder="ルームID (例: ABCD)">
+        <input type="text" id="name-input" placeholder="あなたのニックネーム">
+        <button id="join-btn">部屋に入る / 作る</button>
+    </div>
+
+    <div id="waiting-screen" class="box hidden">
+        <h2>待機室: <span id="display-room-id"></span></h2>
+        <div id="input-area">
+            <input type="text" id="ng-word-input" placeholder="相手に言わせたいNGワード">
+            <button id="submit-word-btn">決定</button>
+            <p id="submit-status" style="color: green; font-weight: bold;"></p>
+        </div>
+        <h3>参加メンバー一覧</h3>
+        <ul id="member-list"></ul>
+        <button id="start-game-btn" class="hidden" disabled>ゲームを開始する（ホスト専用）</button>
+        <p id="host-wait-msg" class="notice-text hidden">ホストがゲームを開始するのを待っています...</p>
+    </div>
+
+    <div id="game-screen" class="box hidden">
+        <h2>🤫 ゲーム中 🤫</h2>
+        <p style="font-size: 0.9em; color: #666;">会話の中で他の人にNGワードを言わせよう！</p>
+        <hr>
+        <h3>あなたの状態</h3>
+        <div class="user-card" style="background: #fff3cd;">
+            <div>NGワード: <span class="word-highlight">❓（秘密）</span></div>
+            <div>言っちゃった回数: <span id="my-out-count" class="out-badge">0回</span></div>
+        </div>
+
+        <h3>みんなのNGワード（言ったら右のボタン！）</h3>
+        <div id="enemy-list"></div>
+
+        <h3>リアルタイムタイムライン</h3>
+        <div id="log-area" class="log-box">ゲームが開始されました。</div>
+
+        <button id="end-game-btn" class="hidden" style="background: #28a745; margin-top: 15px;">ゲーム終了（ホスト専用）</button>
+        <p id="host-end-msg" class="notice-text hidden" style="margin-top:15px;">ホストがゲームを終了するのを待っています...</p>
+    </div>
+
+    <div id="result-screen" class="box hidden">
+        <h2>🏆 結果発表 🏆</h2>
+        <p>今回の答え合わせと最終スコアです！</p>
+        <hr>
+        <h3>全員の答え合わせ</h3>
+        <div id="final-scores"></div>
+
+        <h3>言っちゃった総履歴</h3>
+        <div id="final-logs" class="log-box" style="background: #f8d7da; color: #721c24;"></div>
+
+        <button id="retry-btn" class="hidden" style="background: #17a2b8; margin-top: 15px;">もう一度遊ぶ（ホスト専用）</button>
+        <p id="host-retry-msg" class="notice-text hidden" style="margin-top:15px;">ホストが次のゲームを開始するのを待っています...</p>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        let myRoomID = '';
+        let myName = '';
+        let isHost = false;
+
+        const loginScreen = document.getElementById('login-screen');
+        const waitingScreen = document.getElementById('waiting-screen');
+        const gameScreen = document.getElementById('game-screen');
+        const resultScreen = document.getElementById('result-screen');
+        
+        const joinBtn = document.getElementById('join-btn');
+        const roomIdInput = document.getElementById('room-id-input');
+        const nameInput = document.getElementById('name-input');
+        const ngWordInput = document.getElementById('ng-word-input');
+        const submitWordBtn = document.getElementById('submit-word-btn');
+        const startGameBtn = document.getElementById('start-game-btn');
+        const endGameBtn = document.getElementById('end-game-btn');
+        const retryBtn = document.getElementById('retry-btn');
+        
+        const hostWaitMsg = document.getElementById('host-wait-msg');
+        const hostEndMsg = document.getElementById('host-end-msg');
+        const hostRetryMsg = document.getElementById('host-retry-msg');
+        const displayRoomId = document.getElementById('display-room-id');
+        const memberList = document.getElementById('member-list');
+        const submitStatus = document.getElementById('submit-status');
+        const enemyList = document.getElementById('enemy-list');
+        const myOutCount = document.getElementById('my-out-count');
+        const logArea = document.getElementById('log-area');
+        const finalScores = document.getElementById('final-scores');
+        const finalLogs = document.getElementById('final-logs');
+
+        joinBtn.addEventListener('click', () => {
+            myRoomID = roomIdInput.value.trim().toUpperCase();
+            myName = nameInput.value.trim();
+            if (!myRoomID || !myName) return alert('入力してください');
+
+            socket.emit('join-room', { roomID: myRoomID, name: myName });
+            loginScreen.classList.add('hidden');
+            waitingScreen.classList.remove('hidden');
+            displayRoomId.textContent = myRoomID;
+        });
+
+        submitWordBtn.addEventListener('click', () => {
+            const word = ngWordInput.value.trim();
+            if (!word) return alert('ワードを入力してください');
+
+            socket.emit('submit-word', { roomID: myRoomID, word: word });
+            ngWordInput.disabled = true;
+            submitWordBtn.disabled = true;
+            submitStatus.textContent = 'ワードを送信しました。全員が揃うまでお待ちください。';
+        });
+
+        startGameBtn.addEventListener('click', () => {
+            if(isHost) socket.emit('start-game', { roomID: myRoomID });
+        });
+
+        function reportOut(targetSocketId) {
+            socket.emit('say-ng-word', { roomID: myRoomID, targetSocketId, actorName: myName });
+        }
+
+        endGameBtn.addEventListener('click', () => {
+            if(isHost) socket.emit('end-game', { roomID: myRoomID });
+        });
+
+        retryBtn.addEventListener('click', () => {
+            if(isHost) socket.emit('reset-room', { roomID: myRoomID });
+        });
+
+        // 待機画面の更新
+        socket.on('room-data', (roomData) => {
+            memberList.innerHTML = '';
+            let allReady = true;
+
+            isHost = (roomData.users[0].socketId === socket.id);
+
+            roomData.users.forEach((user, index) => {
+                const li = document.createElement('li');
+                const statusText = user.inputWord ? '✅ 入力済' : '⏳ 入力中...';
+                if (index === 0) {
+                    li.innerHTML = `${user.name} <span class="host-badge">ホスト</span> (${statusText})`;
+                } else {
+                    li.textContent = `${user.name} (${statusText})`;
+                }
+                memberList.appendChild(li);
+                if (!user.inputWord) allReady = false;
+            });
+
+            if (isHost) {
+                startGameBtn.classList.remove('hidden');
+                hostWaitMsg.classList.add('hidden');
+                startGameBtn.disabled = !(allReady && roomData.users.length >= 2);
+            } else {
+                startGameBtn.classList.add('hidden');
+                hostWaitMsg.classList.remove('hidden');
+            }
+        });
+
+        // ゲーム開始
+        socket.on('game-started', (roomData) => {
+            waitingScreen.classList.add('hidden');
+            resultScreen.classList.add('hidden');
+            gameScreen.classList.remove('hidden');
+            checkHostButtons();
+            updateGameDisplay(roomData);
+        });
+
+        socket.on('game-updated', (roomData) => {
+            // プレイ中に誰かが抜けてホストが変わった可能性があるのでチェック
+            isHost = (roomData.users[0].socketId === socket.id);
+            checkHostButtons();
+            updateGameDisplay(roomData);
+        });
+
+        function checkHostButtons() {
+            if (isHost) {
+                endGameBtn.classList.remove('hidden');
+                hostEndMsg.classList.add('hidden');
+                retryBtn.classList.remove('hidden');
+                hostRetryMsg.classList.add('hidden');
+            } else {
+                endGameBtn.classList.add('hidden');
+                hostEndMsg.classList.remove('hidden');
+                retryBtn.classList.add('hidden');
+                hostRetryMsg.classList.remove('hidden');
+            }
+        }
+
+        function updateGameDisplay(roomData) {
+            enemyList.innerHTML = '';
+            roomData.users.forEach(user => {
+                if (user.socketId === socket.id) {
+                    myOutCount.textContent = `${user.outCount}回`;
+                } else {
+                    const div = document.createElement('div');
+                    div.className = 'user-card';
+                    div.innerHTML = `
+                        <div>
+                            <strong>${user.name}</strong> <span class="out-badge">${user.outCount}回</span><br>
+                            NGワード: <span class="word-highlight">${user.targetWord}</span>
+                        </div>
+                        <button class="out-btn" onclick="reportOut('${user.socketId}')">言っちゃった！</button>
+                    `;
+                    enemyList.appendChild(div);
+                }
+            });
+            logArea.innerHTML = roomData.history.map(log => `<div>• ${log}</div>`).join('') || 'ログはまだありません。';
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+
+        // 結果画面
+        socket.on('game-over', (roomData) => {
+            isHost = (roomData.users[0].socketId === socket.id);
+            checkHostButtons();
+            gameScreen.classList.add('hidden');
+            resultScreen.classList.remove('hidden');
+
+            // 【修正】配列検索ではなく、user.giverName をそのまま表示（重複ワードでもバグらない）
+            finalScores.innerHTML = roomData.users.map(user => `
+                <div class="user-card" style="${user.socketId === socket.id ? 'background:#e2f0d9;' : ''}">
+                    <div>
+                        <strong>${user.name}</strong> (アウト: <span class="word-highlight">${user.outCount}回</span>)<br>
+                        <small>設定されたNGワード: <b>${user.targetWord}</b> (考案者: ${user.giverName || '不明'})</small>
+                    </div>
+                </div>
+            `).join('');
+
+            finalLogs.innerHTML = roomData.history.map(log => `<div>• ${log}</div>`).join('') || 'NGワードを言った人はいませんでした！';
+        });
+
+        socket.on('room-reseted', (roomData) => {
+            resultScreen.classList.add('hidden');
+            waitingScreen.classList.remove('hidden');
+            ngWordInput.value = '';
+            ngWordInput.disabled = false;
+            submitWordBtn.disabled = false;
+            submitStatus.textContent = '';
+            socket.emit('submit-word', { roomID: myRoomID, word: '' });
+        });
+
+        socket.on('error-msg', (msg) => {
+            alert(msg);
+            window.location.reload();
+        });
+    </script>
+</body>
+</html>
