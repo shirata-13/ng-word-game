@@ -20,7 +20,7 @@ io.on('connection', (socket) => {
         if (!rooms[roomID]) {
             rooms[roomID] = {
                 roomID: roomID,
-                status: 'waiting',
+                status: 'waiting', // waiting / targeting / playing / result
                 users: [],
                 history: []
             };
@@ -34,9 +34,11 @@ io.on('connection', (socket) => {
         rooms[roomID].users.push({
             socketId: socket.id,
             name: name,
-            inputWord: '',
-            targetWord: '',
-            giverName: '', // 【新規】このワードの考案者（提供者）の名前を固定で持つ
+            targetUserSocketId: '', // 自分がワードを書く対象のSocketID
+            targetUserName: '',     // 自分がワードを書く対象の名前
+            inputWord: '',          // 自分が「ターゲットに向けて」考えたワード
+            targetWord: '',         // 自分に設定されたNGワード
+            giverName: '',          // 自分のNGワードを考えた人の名前
             outCount: 0,
             lastOutTime: 0
         });
@@ -44,20 +46,53 @@ io.on('connection', (socket) => {
         io.to(roomID).emit('room-data', rooms[roomID]);
     });
 
-    // 2. NGワードの提出
+    // 2. 【新規】ホストが「メンバー確定（ターゲット割り振振）」を押したとき
+    socket.on('assign-targets', ({ roomID }) => {
+        const room = rooms[roomID];
+        if (!room || room.users.length < 2) return;
+        if (room.users[0].socketId !== socket.id) return; // ホスト制限
+
+        room.status = 'targeting';
+
+        // 席替え方式で「誰が誰宛てに書くか」のペアを先に決める
+        // ユーザーAはユーザーB宛て、BはC宛て、CはA宛てに書く
+        const len = room.users.length;
+        for (let i = 0; i < len; i++) {
+            const nextIndex = (i + 1) % len;
+            room.users[i].targetUserSocketId = room.users[nextIndex].socketId;
+            room.users[i].targetUserName = room.users[nextIndex].name;
+        }
+
+        // 全員にターゲット決定（入力フェーズ開始）を通知
+        io.to(roomID).emit('targets-assigned', room);
+    });
+
+    // 3. 【修正】ワードの提出（ターゲットへ直接NGワードとして書き込む）
     socket.on('submit-word', ({ roomID, word }) => {
         const room = rooms[roomID];
         if (!room) return;
 
-        const user = room.users.find(u => u.socketId === socket.id);
-        if (user) {
-            user.inputWord = word;
+        // 1. まず自分の入力状態を保存
+        const myUser = room.users.find(u => u.socketId === socket.id);
+        if (myUser) {
+            myUser.inputWord = word;
+
+            // 2. 自分が書く対象（ターゲット）を探して、その人の「targetWord」と「giverName」に直接代入！
+            const targetUser = room.users.find(u => u.socketId === myUser.targetUserSocketId);
+            if (targetUser) {
+                targetUser.targetWord = word;
+                targetUser.giverName = myUser.name; // 考案者は自分
+            }
         }
 
+        // 全員の入力が完了したかチェック（wordがリセット用の空文字ではないことを確認）
+        const allSubmitted = room.users.every(u => u.inputWord !== '');
+
+        // 状態を全員に通知（「入力済」のチェックマーク反映用）
         io.to(roomID).emit('room-data', room);
     });
 
-    // 3. ゲーム開始（シャッフル）
+    // 4. 【修正】ゲーム開始（すでに割り当ては終わっているので、ステータスを playing に変えるだけ）
     socket.on('start-game', ({ roomID }) => {
         const room = rooms[roomID];
         if (!room || room.users.length < 2) return;
@@ -66,22 +101,16 @@ io.on('connection', (socket) => {
         room.status = 'playing';
         room.history = [];
 
-        const len = room.users.length;
-        for (let i = 0; i < len; i++) {
-            const nextIndex = (i + 1) % len;
-            // 席替え方式で次の人のワードをもらう
-            room.users[i].targetWord = room.users[nextIndex].inputWord;
-            // 【修正】ワードをもらった相手の名前を「giverName」として確実に記憶（重複ワード対策）
-            room.users[i].giverName = room.users[nextIndex].name;
-            
-            room.users[i].outCount = 0;
-            room.users[i].lastOutTime = 0;
-        }
+        // カウント等の初期化
+        room.users.forEach(u => {
+            u.outCount = 0;
+            u.lastOutTime = 0;
+        });
 
         io.to(roomID).emit('game-started', room);
     });
 
-    // 4. 「言っちゃった」ボタン（1分間重複防止）
+    // 5. 「言っちゃった」ボタン（変更なし）
     socket.on('say-ng-word', ({ roomID, targetSocketId, actorName }) => {
         const room = rooms[roomID];
         if (!room || room.status !== 'playing') return;
@@ -91,9 +120,7 @@ io.on('connection', (socket) => {
             const currentTime = Date.now();
             const cooldown = 60 * 1000;
 
-            if (currentTime - targetUser.lastOutTime < cooldown) {
-                return;
-            }
+            if (currentTime - targetUser.lastOutTime < cooldown) return;
 
             targetUser.outCount += 1;
             targetUser.lastOutTime = currentTime;
@@ -105,7 +132,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    // 5. ゲーム終了
+    // 6. ゲーム終了（変更なし）
     socket.on('end-game', ({ roomID }) => {
         const room = rooms[roomID];
         if (!room || room.users[0].socketId !== socket.id) return;
@@ -114,7 +141,7 @@ io.on('connection', (socket) => {
         io.to(roomID).emit('game-over', room);
     });
 
-    // 6. もう一度遊ぶ（リセット）
+    // 7. もう一度遊ぶ（リセット・変更なし）
     socket.on('reset-room', ({ roomID }) => {
         const room = rooms[roomID];
         if (!room || room.users[0].socketId !== socket.id) return;
@@ -124,6 +151,8 @@ io.on('connection', (socket) => {
         room.users.forEach(user => {
             user.inputWord = '';
             user.targetWord = '';
+            user.targetUserSocketId = '';
+            user.targetUserName = '';
             user.giverName = '';
             user.outCount = 0;
             user.lastOutTime = 0;
@@ -132,42 +161,31 @@ io.on('connection', (socket) => {
         io.to(roomID).emit('room-reseted', room);
     });
 
-    // 7. 【修正・拡張】ユーザー切断時のホスト移譲ロジック
+    // 8. ユーザー切断時のホスト移譲（変更なし）
     socket.on('disconnect', () => {
         console.log('ユーザーが切断しました:', socket.id);
-
-        // 全ての部屋をループして、切断したユーザーがいた部屋を探す
         Object.keys(rooms).forEach(roomID => {
             const room = rooms[roomID];
             const userIndex = room.users.findIndex(u => u.socketId === socket.id);
 
             if (userIndex !== -1) {
                 const disconnectedUser = room.users[userIndex];
-                // 部屋からユーザーを削除
                 room.users.splice(userIndex, 1);
-                console.log(`${disconnectedUser.name} が部屋 ${roomID} から退出しました。`);
 
-                // 部屋にまだ誰か残っている場合
                 if (room.users.length > 0) {
-                    // もしプレイ中や結果画面なら、ログに残す
                     if (room.status === 'playing' || room.status === 'result') {
                         room.history.push(`${disconnectedUser.name}さんが退室しました。`);
                     }
 
-                    // ユーザーリストが更新された（＝先頭が入れ替わったら自動で新ホストになる）ので全員に通知
-                    // プレイ中ならゲーム画面、待機中なら待機画面をそれぞれ更新させる
-                    if (room.status === 'waiting') {
+                    if (room.status === 'waiting' || room.status === 'targeting') {
                         io.to(roomID).emit('room-data', room);
                     } else if (room.status === 'playing') {
                         io.to(roomID).emit('game-updated', room);
                     } else if (room.status === 'result') {
-                        // 結果画面のボタン状態を更新するため、ゲームオーバーイベントを再送
                         io.to(roomID).emit('game-over', room);
                     }
                 } else {
-                    // 部屋に誰一人いなくなったら部屋データを削除
                     delete rooms[roomID];
-                    console.log(`部屋 ${roomID} は空になったため削除されました。`);
                 }
             }
         });
